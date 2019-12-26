@@ -1,0 +1,8 @@
+cradle:
+  cabal:
+    component: "exe:compiler"
+
+dependencies:
+  - compiler.cabal
+  - shell.nix
+  - default.nix
