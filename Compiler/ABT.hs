@@ -8,6 +8,7 @@
 
 module Compiler.ABT where
 
+import Control.Lens (makeLenses)
 import Data.Functor.Classes (Show1 (..), showsPrec1)
 import qualified Data.Set as Set
 import Relude ((++), (<>), (==))
@@ -31,6 +32,9 @@ data Term f a
         _termAnnotation :: a,
         _termOut :: ABT f (Term f a)
         }
+  deriving (R.Functor)
+
+makeLenses ''Term
 
 $(deriveShow1 ''Term)
 
@@ -40,11 +44,11 @@ instance (Show1 f, R.Functor f, R.Show a) => R.Show (Term f a) where
 annotatedVar :: a -> V -> Term f a
 annotatedVar a v = Term (Set.singleton v) a (Var v)
 
-var :: V -> Term f ()
-var = annotatedVar ()
+var :: R.Monoid m => V -> Term f m
+var = annotatedVar R.mempty
 
-abs :: V -> Term f () -> Term f ()
-abs = abs' ()
+abs :: R.Monoid m => V -> Term f m -> Term f m
+abs = abs' R.mempty
 
 abs' :: a -> V -> Term f a -> Term f a
 abs' a v body = Term (Set.delete v (_termFreevars body)) a (Abs v body)
@@ -55,8 +59,8 @@ tm' a t =
     a
     (Tm t)
 
-tm :: (R.Foldable f, R.Functor f) => f (Term f ()) -> Term f ()
-tm = tm' ()
+tm :: (R.Monoid m, R.Foldable f, R.Functor f) => f (Term f m) -> Term f m
+tm = tm' R.mempty
 
 into' :: (R.Foldable f, R.Functor f) => a -> ABT f (Term f a) -> Term f a
 into' a abt = case abt of

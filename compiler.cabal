@@ -20,5 +20,5 @@ executable compiler
   main-is:             Main.hs
   ghc-options: -O2 -flate-specialise -fspecialise-aggressively -threaded -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -Wno-name-shadowing
   other-modules: Compiler.ABT
-  build-depends:       base >=4.12 && <4.13, relude, megaparsec, unification-fd, prettyprinter, fused-effects, containers, transformers, deriving-compat
+  build-depends:       base >=4.12 && <4.13, relude, megaparsec, unification-fd, prettyprinter, fused-effects, containers, transformers, deriving-compat, mtl, profunctors, lens, raw-strings-qq
   default-language:    Haskell2010

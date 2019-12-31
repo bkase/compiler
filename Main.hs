@@ -3,21 +3,27 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Main where
 
 import qualified Compiler.ABT as ABT
+import Control.Lens ((.~), (^.))
+import Control.Monad.Writer (MonadWriter, WriterT, listen, runWriterT, tell)
 import qualified Data.List as DL
-import qualified Data.Set as Set ()
-import Relude (($), ($>), (++), (-), (.), (/=), (<$>), (<*), (<*>), (<=), (<>), (<|>), (==), NonEmpty ((:|)))
+import qualified Data.Set as Set (empty)
+import Relude (($), ($>), (&), (++), (-), (.), (/=), (<$>), (<*), (<*>), (<=), (<>), (<|>), (==), NonEmpty ((:|)))
 import qualified Relude as R
-import Text.Megaparsec (Parsec, PosState (..), SourcePos (..), State (..), Stream (..), chunk, empty, getParserState, getSourcePos, many, runParser, satisfy)
+import Text.Megaparsec (Parsec, Pos, PosState (..), SourcePos (..), State (..), Stream (..), between, chunk, empty, getParserState, getSourcePos, initialPos, many, mkPos, runParser, token)
 import Text.Megaparsec.Char (alphaNumChar, char, letterChar, space)
 import Text.Megaparsec.Char.Lexer (decimal)
 import Text.Megaparsec.Error (ParseErrorBundle)
+import Text.RawString.QQ
 import Text.Show.Deriving
 
 data Tok
@@ -50,6 +56,24 @@ type Parser = Parsec R.Void R.Text
 
 data Span = Span {_spanStart :: SourcePos, _spanEnd :: SourcePos}
   deriving (R.Show, R.Ord, R.Eq)
+
+instance R.Semigroup Span where
+  Span start end <> Span start' end' = Span (start `minStart` start') (end `maxEnd` end')
+    where
+      coalesce :: (Pos -> Pos -> Pos) -> SourcePos -> SourcePos -> SourcePos
+      coalesce op (SourcePos "" l1 c1) (SourcePos n2 l2 c2) = SourcePos n2 (l1 `op` l2) (c1 `op` c2)
+      coalesce op (SourcePos n1 l1 c1) (SourcePos "" l2 c2) = SourcePos n1 (l1 `op` l2) (c1 `op` c2)
+      coalesce op (SourcePos n1 l1 c1) (SourcePos _ l2 c2) = SourcePos n1 (l1 `op` l2) (c1 `op` c2)
+      minStart :: SourcePos -> SourcePos -> SourcePos
+      minStart = coalesce R.min
+      maxEnd :: SourcePos -> SourcePos -> SourcePos
+      maxEnd = coalesce R.max
+
+instance R.Monoid Span where
+  mempty = Span (SourcePos "" infPos infPos) (initialPos "")
+    where
+      infPos :: Pos
+      infPos = mkPos R.maxInt
 
 data Span' = Span' {_spanTokenLength :: R.Int, _spanSpan :: Span}
   deriving (R.Show, R.Ord, R.Eq)
@@ -204,31 +228,76 @@ type AnnTerm a = ABT.Term F a
 
 type Term' = AnnTerm ()
 
-type Parser2 = Parsec R.Void Toks
+type Parser2 = WriterT Span (Parsec R.Void Toks)
 
 type Term = AnnTerm Span
 
+token' :: (Tok -> R.Maybe a) -> Parser2 (Span, a)
+token' f = token (\(Spanned (Span' _ span) x) -> (span,) <$> f x) Set.empty
+
+satisfy' :: (Tok -> R.Bool) -> Parser2 (Span, Tok)
+satisfy' p = token' (\tok -> if p tok then R.Just tok else R.Nothing)
+
+flush :: Parser2 (Span, a) -> Parser2 a
+flush p = do
+  (span, a) <- p
+  () <- tell span
+  R.pure a
+
+annotate :: Parser2 (Span, Term) -> Parser2 Term
+annotate p = do
+  (span, term) <- p
+  () <- tell span
+  R.pure $ term & ABT.termAnnotation .~ span
+
+examine :: Parser2 Term -> Parser2 (Span, Term)
+examine p = do
+  term <- p
+  R.pure (term ^. ABT.termAnnotation, term)
+
+listen' :: MonadWriter w m => m a -> m (w, a)
+listen' ma = R.swap <$> listen ma
+
 doParse :: Toks -> R.Either (ParseErrorBundle Toks R.Void) Term
-doParse = runParser expr "test.pcf"
+doParse toks = R.fst <$> partial toks
   where
+    partial :: Toks -> R.Either (ParseErrorBundle Toks R.Void) (Term, Span)
+    partial = runParser (runWriterT expr) "test.pcf"
     expr :: Parser2 Term
     expr = parenned <|> literalBoolean <|> literalNat <|> lam <|> if_ <|> let_
     parenned :: Parser2 Term
-    parenned = empty -- between (single LParen) expr (single RParen)
+    parenned =
+      between
+        (satisfy' (== LParen) & flush)
+        (satisfy' (== RParen) & flush)
+        expr
+        & listen'
+        & annotate
     literalBoolean :: Parser2 Term
     literalBoolean = boolLit "true" R.True <|> boolLit "false" R.False
     boolLit :: R.Text -> R.Bool -> Parser2 Term
-    boolLit text b = do
-      Spanned (Span' _ span) _ <- satisfy (\(Spanned _ a) -> a == Word text)
-      R.pure $ ABT.tm' span (Boolean b)
+    boolLit text b = R.fmap (R.const (ABT.tm (Boolean b))) <$> satisfy' (\a -> a == Word text) & annotate
     lam = empty
-    if_ = empty
+    if_ = annotate $ listen' $ do
+      _ <- satisfy' (== Word "if") & flush
+      e1 <- expr
+      _ <- satisfy' (== Word "then") & flush
+      e2 <- expr
+      _ <- satisfy' (== Word "else") & flush
+      e3 <- expr
+      R.pure $ ABT.tm (If e1 e2 e3)
     let_ = empty
     literalNat = empty
 
 main :: R.IO ()
 main = do
-  let input = "true"
+  let input =
+        [r|
+      if ((false)) then
+          true
+      else
+          (true)
+  |]
   case doLex input of
     (R.Left e) -> R.print e
     (R.Right tokens) ->
