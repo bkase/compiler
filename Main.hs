@@ -14,6 +14,7 @@ module Main where
 
 import qualified Compiler.ABT as ABT
 import Control.Lens ((.~), (^.))
+import qualified Control.Monad.Combinators.Expr as ME
 import Control.Monad.Writer (MonadWriter, WriterT, listen, runWriterT, tell)
 import qualified Data.List as DL
 import qualified Data.Set as Set (empty)
@@ -258,18 +259,69 @@ examine p = do
 listen' :: MonadWriter w m => m a -> m (w, a)
 listen' ma = R.swap <$> listen ma
 
+span :: Parser2 Term -> Parser2 Term
+span = annotate . listen'
+
 doParse :: Toks -> R.Either (ParseErrorBundle Toks R.Void) Term
 doParse toks = R.fst <$> partial toks
   where
     partial :: Toks -> R.Either (ParseErrorBundle Toks R.Void) (Term, Span)
     partial = runParser (runWriterT expr) "test.pcf"
+    exact :: Tok -> Parser2 ()
+    exact tok = R.const () <$> (satisfy' (== tok) & flush)
+    word :: Parser2 R.Text
+    word =
+      token'
+        ( \case
+            Word text -> R.Just text
+            _ -> R.Nothing
+          )
+        & flush
+    num :: Parser2 R.Int
+    num =
+      token'
+        ( \case
+            Num n -> R.Just n
+            _ -> R.Nothing
+          )
+        & flush
+    -- typ
+    typ :: Parser2 Typ
+    typ = ME.makeExprParser (tparenned typ <|> tbool <|> tnat) operators
+      where
+        operators :: [[ME.Operator Parser2 Typ]]
+        operators = [[ME.InfixR $ exact Arrow $> TArr]]
+    tparenned :: Parser2 Typ -> Parser2 Typ
+    tparenned = between (exact LParen) (exact RParen)
+    tbool :: Parser2 Typ
+    tbool = exact (Word "Bool") $> TBool
+    tnat :: Parser2 Typ
+    tnat = exact (Word "Nat") $> TNat
+    -- not including app
+    expr' :: Parser2 Term
+    expr' = parenned <|> literalBoolean <|> literalNat <|> lam <|> if_ <|> let_ <|> fix <|> var
     expr :: Parser2 Term
-    expr = parenned <|> literalBoolean <|> literalNat <|> lam <|> if_ <|> let_
+    expr = expr' <|> app
+    app :: Parser2 Term
+    app = span $ do
+      e1 <- expr' <|> var
+      ABT.tm . App e1 <$> expr
+    var :: Parser2 Term
+    var = span $ ABT.var <$> word
+    fix :: Parser2 Term
+    fix = span $ do
+      () <- exact (Word "fix")
+      () <- exact LParen
+      e <- lam
+      () <- exact RParen
+      case e ^. ABT.termOut of
+        (ABT.Tm (Lam typ e)) -> R.pure $ ABT.tm $ Fix typ e
+        _ -> R.undefined
     parenned :: Parser2 Term
     parenned =
       between
-        (satisfy' (== LParen) & flush)
-        (satisfy' (== RParen) & flush)
+        (exact LParen)
+        (exact RParen)
         expr
         & listen'
         & annotate
@@ -277,26 +329,38 @@ doParse toks = R.fst <$> partial toks
     literalBoolean = boolLit "true" R.True <|> boolLit "false" R.False
     boolLit :: R.Text -> R.Bool -> Parser2 Term
     boolLit text b = R.fmap (R.const (ABT.tm (Boolean b))) <$> satisfy' (\a -> a == Word text) & annotate
-    lam = empty
-    if_ = annotate $ listen' $ do
-      _ <- satisfy' (== Word "if") & flush
+    lam = span $ do
+      () <- exact Slash
+      v <- word
+      () <- exact Colon
+      t <- typ
+      () <- exact Dot
+      ABT.tm . Lam t . ABT.abs v <$> expr
+    if_ = span $ do
+      _ <- exact $ Word "if"
       e1 <- expr
-      _ <- satisfy' (== Word "then") & flush
+      _ <- exact $ Word "then"
       e2 <- expr
-      _ <- satisfy' (== Word "else") & flush
-      e3 <- expr
-      R.pure $ ABT.tm (If e1 e2 e3)
-    let_ = empty
-    literalNat = empty
+      _ <- exact $ Word "else"
+      ABT.tm . If e1 e2 <$> expr
+    let_ = span $ do
+      _ <- exact $ Word "let"
+      v <- word
+      _ <- exact Equals
+      e1 <- expr
+      _ <- exact $ Word "in"
+      e2 <- expr
+      let set = e2 ^. ABT.termFreevars
+      R.pure $ ABT.tm $ Let e1 $ ABT.abs (ABT.fresh' set v) e2
+    literalNat = span $ ABT.tm . Nat <$> num
 
 main :: R.IO ()
 main = do
   let input =
         [r|
-      if ((false)) then
-          true
-      else
-          (true)
+        f a
+b
+  c
   |]
   case doLex input of
     (R.Left e) -> R.print e

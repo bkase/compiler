@@ -11,12 +11,12 @@ module Compiler.ABT where
 import Control.Lens (makeLenses)
 import Data.Functor.Classes (Show1 (..), showsPrec1)
 import qualified Data.Set as Set
-import Relude ((++), (<>), (==))
+import Relude ((<>), (==))
 import qualified Relude as R
 import Text.Show.Deriving (deriveShow1)
 import qualified Prelude (show)
 
-type V = R.String
+type V = R.Text
 
 data ABT f a
   = Var V
@@ -72,7 +72,7 @@ into :: (R.Foldable f, R.Functor f) => ABT f (Term f ()) -> Term f ()
 into = into' ()
 
 fresh :: (V -> R.Bool) -> V -> V
-fresh used v | used v = fresh used ("'" ++ v)
+fresh used v | used v = fresh used ("'" <> v)
 fresh _ v = v
 
 fresh' :: R.Set V -> V -> V
