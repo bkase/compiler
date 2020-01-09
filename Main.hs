@@ -301,11 +301,15 @@ doParse toks = R.fst <$> partial toks
     expr' :: Parser2 Term
     expr' = parenned <|> literalBoolean <|> literalNat <|> lam <|> if_ <|> let_ <|> fix <|> var
     expr :: Parser2 Term
-    expr = expr' <|> app
-    app :: Parser2 Term
-    app = span $ do
-      e1 <- expr' <|> var
-      ABT.tm . App e1 <$> expr
+    expr = ME.makeExprParser expr' [[app]]
+      where
+        app :: ME.Operator Parser2 Term
+        app = ME.InfixL $ R.pure op
+          where
+            op :: Term -> Term -> Term
+            op a b = ABT.tm' (ann a <> ann b) (App a b)
+            ann :: Term -> Span
+            ann t = t ^. ABT.termAnnotation
     var :: Parser2 Term
     var = span $ ABT.var <$> word
     fix :: Parser2 Term
@@ -358,9 +362,7 @@ main :: R.IO ()
 main = do
   let input =
         [r|
-        f a
-b
-  c
+        f a b n
   |]
   case doLex input of
     (R.Left e) -> R.print e
