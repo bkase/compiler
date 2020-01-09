@@ -20,9 +20,10 @@ import qualified Data.List as DL
 import qualified Data.Set as Set (empty)
 import Relude (($), ($>), (&), (++), (-), (.), (/=), (<$>), (<*), (<*>), (<=), (<>), (<|>), (==), NonEmpty ((:|)))
 import qualified Relude as R
-import Text.Megaparsec (Parsec, Pos, PosState (..), SourcePos (..), State (..), Stream (..), between, chunk, empty, getParserState, getSourcePos, initialPos, many, mkPos, runParser, token)
+import Text.Megaparsec ((<?>), Parsec, Pos, PosState (..), SourcePos (..), State (..), Stream (..), between, chunk, empty, getParserState, getSourcePos, initialPos, many, mkPos, runParser, token)
 import Text.Megaparsec.Char (alphaNumChar, char, letterChar, space)
 import Text.Megaparsec.Char.Lexer (decimal)
+import Text.Megaparsec.Debug (dbg)
 import Text.Megaparsec.Error (ParseErrorBundle)
 import Text.RawString.QQ
 import Text.Show.Deriving
@@ -262,6 +263,21 @@ listen' ma = R.swap <$> listen ma
 span :: Parser2 Term -> Parser2 Term
 span = annotate . listen'
 
+dbg' :: R.Show a => R.String -> Parser2 a -> Parser2 a
+dbg' s p =
+  R.fst <$> R.lift (dbg s $ runWriterT p)
+
+isReserved :: R.Text -> R.Bool
+isReserved "if" = R.True
+isReserved "then" = R.True
+isReserved "else" = R.True
+isReserved "true" = R.True
+isReserved "false" = R.True
+isReserved "fix" = R.True
+isReserved "let" = R.True
+isReserved "in" = R.True
+isReserved _ = R.False
+
 doParse :: Toks -> R.Either (ParseErrorBundle Toks R.Void) Term
 doParse toks = R.fst <$> partial toks
   where
@@ -273,7 +289,7 @@ doParse toks = R.fst <$> partial toks
     word =
       token'
         ( \case
-            Word text -> R.Just text
+            Word text | (R.not . isReserved) text -> R.Just text
             _ -> R.Nothing
           )
         & flush
@@ -316,11 +332,9 @@ doParse toks = R.fst <$> partial toks
     fix = span $ do
       () <- exact (Word "fix")
       () <- exact LParen
-      e <- lam
+      (v, typ, e) <- lam'
       () <- exact RParen
-      case e ^. ABT.termOut of
-        (ABT.Tm (Lam typ e)) -> R.pure $ ABT.tm $ Fix typ e
-        _ -> R.undefined
+      R.pure $ ABT.tm $ Fix typ $ ABT.abs v e
     parenned :: Parser2 Term
     parenned =
       between
@@ -333,19 +347,22 @@ doParse toks = R.fst <$> partial toks
     literalBoolean = boolLit "true" R.True <|> boolLit "false" R.False
     boolLit :: R.Text -> R.Bool -> Parser2 Term
     boolLit text b = R.fmap (R.const (ABT.tm (Boolean b))) <$> satisfy' (\a -> a == Word text) & annotate
-    lam = span $ do
+    lam' = do
       () <- exact Slash
       v <- word
       () <- exact Colon
       t <- typ
       () <- exact Dot
-      ABT.tm . Lam t . ABT.abs v <$> expr
+      (v,t,) <$> expr
+    lam = span $ do
+      (v, t, e) <- lam'
+      R.pure $ ABT.tm $ Lam t $ ABT.abs v e
     if_ = span $ do
-      _ <- exact $ Word "if"
+      _ <- exact (Word "if") <?> "if"
       e1 <- expr
-      _ <- exact $ Word "then"
+      _ <- exact (Word "then") <?> "then"
       e2 <- expr
-      _ <- exact $ Word "else"
+      _ <- exact (Word "else") <?> "else"
       ABT.tm . If e1 e2 <$> expr
     let_ = span $ do
       _ <- exact $ Word "let"
@@ -362,7 +379,7 @@ main :: R.IO ()
 main = do
   let input =
         [r|
-        f a b n
+fix (\rec : Nat -> Nat. \x : Nat. if is-zero x then 0 else rec (pred x)) 2
   |]
   case doLex input of
     (R.Left e) -> R.print e
