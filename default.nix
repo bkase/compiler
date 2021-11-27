@@ -9,6 +9,8 @@ let
           {
             ghc = super.ghc // { withPackages = super.ghc.withHoogle; };
             ghcWithPackages = self.ghc.withPackages;
+            vinyl = pkgs.haskell.lib.dontCheck super.vinyl;
+            abt = self.callPackage ./abt.nix {};
           }
       );
     };

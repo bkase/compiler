@@ -1,14 +1,21 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main where
 
@@ -18,8 +25,13 @@ import qualified Control.Monad.Combinators.Expr as ME
 import Control.Monad.Writer (MonadWriter, WriterT, listen, runWriterT, tell)
 import qualified Data.List as DL
 import qualified Data.Set as Set (empty)
-import Relude (($), ($>), (&), (++), (-), (.), (/=), (<$>), (<*), (<*>), (<=), (<>), (<|>), (==), NonEmpty ((:|)))
+import Data.Vinyl
+import Data.Vinyl.Functor (Compose (..), Identity (..))
+import Data.Vinyl.XRec (IsoHKD(..))
+import Relude (($), ($>), (&), (++), (-), (.), (/=), (<$>), (<*), (<*>), (<=), (<>), (<|>), (==), NonEmpty ((:|)), (+))
+import GHC.Show
 import qualified Relude as R
+-- import Abt.Concrete.LocallyNameless
 import Text.Megaparsec ((<?>), Parsec, Pos, PosState (..), SourcePos (..), State (..), Stream (..), between, chunk, empty, getParserState, getSourcePos, initialPos, many, mkPos, runParser, token)
 import Text.Megaparsec.Char (alphaNumChar, char, letterChar, space)
 import Text.Megaparsec.Char.Lexer (decimal)
@@ -81,7 +93,7 @@ data Span' = Span' {_spanTokenLength :: R.Int, _spanSpan :: Span}
   deriving (R.Show, R.Ord, R.Eq)
 
 data Spanned a = Spanned {_spannedSpan :: Span', _spannedA :: a}
-  deriving (R.Show, R.Ord, R.Eq)
+  deriving (R.Show, R.Ord, R.Eq, R.Functor)
 
 spanned :: Parser a -> Parser (Spanned a)
 spanned p = do
@@ -375,8 +387,52 @@ doParse toks = R.fst <$> partial toks
       R.pure $ ABT.tm $ Let e1 $ ABT.abs (ABT.fresh' set v) e2
     literalNat = span $ ABT.tm . Nat <$> num
 
+data Nat = Z | S Nat
+
+data Lang :: ([Nat] -> *) where
+  Lam' :: Lang '[ 'S 'Z]
+  App' :: Lang '[ 'Z, 'Z]
+
+instance Show (Lang '[ 'S 'Z]) where
+  show Lam' = "Lam"
+instance Show (Lang '[ 'Z, 'Z]) where
+  show App' = "App"
+
+instance IsoHKD Spanned a
+instance IsoHKD Lang a
+instance IsoHKD (R.State R.Int) a
+
+type Compose3 f g h = Compose f (Compose g h)
+
+type Stack = Compose3 (R.State R.Int) Spanned Lang
+
+sample :: Rec Stack '[ '[ 'S 'Z], '[ 'Z, 'Z]]
+sample = a :& b :& RNil
+  where
+
+    a :: Stack '[ 'S 'Z]
+    a = unHKD $ do
+      () <- R.modify (+1)
+      R.pure $ Spanned (Span' 3 R.mempty) Lam'
+
+    b :: Stack '[ 'Z, 'Z]
+    b = unHKD $ do
+      () <- R.modify (+5)
+      R.pure $ Spanned (Span' 2 R.mempty) App'
+
+unspan :: forall (ns :: [Nat]). Compose Spanned Lang ns -> Lang ns
+unspan x = case toHKD x of
+  Spanned _ l -> l
+
+unstate :: forall (ns :: [Nat]). Stack ns -> R.State R.Int (Compose Spanned Lang ns)
+unstate s = unHKD <$> toHKD s
+
 main :: R.IO ()
 main = do
+  let (stack, resultState) = R.runState (rtraverse unstate sample) (0 :: R.Int)
+  R.print $ resultState
+  R.print $ stack
+  R.print $ unspan <<$>> stack
   let input =
         [r|
 fix (\rec : Nat -> Nat. \x : Nat. if is-zero x then 0 else rec (pred x)) 2
